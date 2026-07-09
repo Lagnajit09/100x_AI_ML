@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: minigpt-v2-tinystories
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
