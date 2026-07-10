@@ -77,6 +77,11 @@ def generate(prompt, max_new_tokens, temperature, top_p, rep_penalty):
 
     for _ in range(int(max_new_tokens) - 1):
         current_pos = len(generated) - 1
+        # RoPE tables are precomputed up to block_size positions only.
+        # Once we've filled the context window, the model can't attend
+        # further, so stop cleanly rather than indexing past the table.
+        if current_pos >= BLOCK_SIZE:
+            break
         input_tensor = torch.tensor([[next_id]], dtype=torch.long).to(DEVICE)
         logits, kv_caches = model(input_tensor, kv_caches=kv_caches, start_pos=current_pos)
         next_id = _sample(logits[0, -1], temperature, top_p=top_p,
@@ -94,10 +99,16 @@ with gr.Blocks(title="MiniGPT v2 — TinyStories") as demo:
         SwiGLU, and grouped query attention, with a from-scratch byte-pair
         encoding tokenizer trained on the TinyStories dataset.
 
-        **Known limitation:** the tokenizer occasionally fuses word-fragment
-        tokens into non-words in longer generations (e.g. "harmeagrow") —
-        a documented capacity/vocabulary limitation of this small a model,
-        not a bug.
+        **Context window:** the model was trained with a 64-token context, so
+        generation stops once that window is full — asking for more tokens than
+        that won't produce longer output. Short story fragments work best.
+
+        **Temperature tip:** lower temperature (~0.4–0.7) gives the cleanest,
+        most coherent text — this small a model leans on the simple, repetitive
+        patterns it saw in TinyStories. Higher temperature is more creative but
+        more likely to fuse word-fragments into occasional non-words
+        (e.g. "harmeagrow"), a known limitation of the from-scratch tokenizer
+        at this model scale.
         """
     )
 
@@ -108,7 +119,8 @@ with gr.Blocks(title="MiniGPT v2 — TinyStories") as demo:
                 placeholder="Once upon a time",
                 value="Once upon a time",
             )
-            max_tokens = gr.Slider(20, 300, value=150, step=10, label="Max new tokens")
+            max_tokens = gr.Slider(10, 64, value=60, step=2,
+                                    label="Max new tokens (capped by 64-token context)")
             temperature = gr.Slider(0.0, 1.5, value=0.6, step=0.05, label="Temperature")
             top_p = gr.Slider(0.1, 1.0, value=0.9, step=0.05, label="Top-p")
             rep_penalty = gr.Slider(1.0, 2.0, value=1.2, step=0.05, label="Repetition penalty")

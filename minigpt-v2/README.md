@@ -41,7 +41,11 @@ scheduling, peak LR 3e-4.
 ## Known limitation: token fusion
 
 Generated text occasionally fuses word-fragment tokens into non-words
-(e.g. "harmeagrow", "sucturkey"). This was diagnosed across multiple
+(e.g. "harmeagrow", "sucturkey"), most visibly at higher sampling
+temperatures. At low temperature (~0.4–0.7) the model produces clean,
+coherent text by leaning on the simple, repetitive patterns it saw in
+TinyStories — to the point where output can closely echo memorized
+training boilerplate. The fusion failure mode was diagnosed across multiple
 training runs — varying model capacity (1.3M → 6.8M parameters) and
 training steps (5,000 → 10,000) — as a **token-boundary learning
 problem**, not primarily a model-capacity limitation: increasing both
@@ -83,6 +87,14 @@ overall trade-off given the remaining time budget.
 
 Space-prefix boundary marking (GPT-2-style), a larger and more
 diverse training corpus, or substantially greater model scale.
+
+## Context window
+
+The model was trained with a 64-token context (`block_size=64`), and
+RoPE position tables are precomputed only up to that length. Generation
+therefore stops cleanly once the context window is full; requesting more
+tokens than that produces no additional output. This is a deliberate cap,
+not a failure — the model has no learned behavior beyond position 64.
 
 ## Usage
 
