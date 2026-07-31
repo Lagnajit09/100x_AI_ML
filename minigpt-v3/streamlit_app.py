@@ -83,12 +83,12 @@ def generate(repo, instruction, temperature, top_p, max_new_tokens):
             do_sample=True,
             temperature=float(temperature),
             top_p=float(top_p),
-            repetition_penalty=1.3,
-            no_repeat_ngram_size=3,
+            repetition_penalty=1.15,     # softened from 1.3 — 1.3 forced the model off-distribution
+            no_repeat_ngram_size=4,      # loosened from 3 — a hard 3-gram ban pushed a tiny model into junk
+            eos_token_id=tok.eos_token_id,   # stop when the model emits EOS (it was trained to)
             pad_token_id=tok.eos_token_id,
         )
-    return tok.decode(out[0][enc["input_ids"].shape[1]:],
-                      skip_special_tokens=True).strip()
+    return tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -140,9 +140,9 @@ prompt = st.text_area(
 
 with st.expander("Generation settings"):
     c1, c2, c3 = st.columns(3)
-    temperature = c1.slider("Temperature", 0.1, 1.5, 0.7, 0.1)
+    temperature = c1.slider("Temperature", 0.1, 1.5, 0.4, 0.1)   # low: 135M stays coherent
     top_p       = c2.slider("Top-p", 0.1, 1.0, 0.9, 0.05)
-    max_tokens  = c3.slider("Max tokens", 32, 256, 120, 8)
+    max_tokens  = c3.slider("Max tokens", 32, 256, 96, 8)
 
 st.caption(
     "⏳ Each run loads and runs four models one at a time on a free CPU — "
