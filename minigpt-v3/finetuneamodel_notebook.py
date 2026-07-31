@@ -45,18 +45,64 @@ lora_config = LoraConfig(
 model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
-"""### **CPT-LoRA** using HuggingFace wikitext-dataset:"""
+"""### **CPT-LoRA** using HuggingFace wikimedia-dataset:"""
 
-ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
+# CPT source: CLEAN Wikipedia prose (markdown stripped, no Moses artifacts).
+ds = load_dataset("wikimedia/wikipedia", "20231101.en",
+                  split="train", streaming=True)
 
-# CPT = raw text, every token counts. Join non-empty lines into one corpus.
-train_text = "\n".join(t for t in ds["train"]["text"]      if t.strip())
-val_text   = "\n".join(t for t in ds["validation"]["text"] if t.strip())
+num_articles = 4000
+articles = []
+for i, ex in enumerate(ds):
+    if i >= num_articles:
+        break
+    if ex["text"].strip():
+        articles.append(ex["text"].strip())
 
-# Pack into one flat stream — exactly your Shakespeare CPT prep, new source
+split      = int(0.9 * len(articles))
+train_text = "\n\n".join(articles[:split])
+val_text   = "\n\n".join(articles[split:])
+
+# Pack into one flat token stream — identical to before, cleaner source
 train_ids = torch.tensor(tokenizer(train_text, add_special_tokens=False)["input_ids"])
 val_ids   = torch.tensor(tokenizer(val_text,   add_special_tokens=False)["input_ids"])
-print(f"train tokens: {len(train_ids):,} | val tokens: {len(val_ids):,}")
+print(f"articles: {len(articles)} | train tokens: {len(train_ids):,} | val tokens: {len(val_ids):,}")
+
+"""### **Scan & Sanity-Check:**"""
+
+# ─── Sanity-check the CPT corpus for WikiText-style artifacts ───────────
+import re, random
+
+# 1. The specific patterns WikiText injected — we want ZERO hits on these.
+patterns = {
+    "@-@ / @.@ / @,@ markers":  r"@[-.,]@",
+    "= = header markers":        r"(?m)^\s*=+.*=+\s*$",
+    "space-before-punctuation":  r"\s[.,;:!?](?:\s|$)",   # ' .' ' ,' etc.
+    "<unk> tokens":              r"<unk>",
+}
+
+full = "\n\n".join(articles)
+print(f"Scanning {len(articles)} articles ({len(full):,} chars)\n")
+
+for label, pat in patterns.items():
+    hits = re.findall(pat, full)
+    flag = "✅ clean" if len(hits) == 0 else f"⚠️ {len(hits):,} hits"
+    print(f"{flag:<16} {label}")
+    if hits:                                  # show a few examples if found
+        for ex in hits[:5]:
+            print(f"                 e.g. {ex!r}")
+
+# 2. Character sanity — what's actually in the corpus?
+import collections
+non_ascii = collections.Counter(c for c in full if ord(c) > 127)
+print(f"\nMost common non-ASCII chars (accents/quotes are fine, gibberish is not):")
+for ch, n in non_ascii.most_common(15):
+    print(f"   {ch!r} (U+{ord(ch):04X}): {n:,}")
+
+# 3. Eyeball three random samples — the ultimate check
+print("\n" + "="*70 + "\n  THREE RANDOM SAMPLES — read these\n" + "="*70)
+for art in random.sample(articles, 3):
+    print("\n" + art[:400].strip() + " …\n" + "-"*70)
 
 """### **Hyperparameters + The Batch Loader:**"""
 
@@ -345,7 +391,7 @@ trainer.save_model("smollm-dpo-orca")
 
 """### **Generate & Compare:**"""
 
-def compare(instruction, max_new_tokens=150, seed=0):
+def compare(instruction, max_new_tokens=250, seed=0):
     prompt = TEMPLATE.format(instruction=instruction)
     enc = tokenizer(prompt, return_tensors="pt").to(device)
     m = trainer.model; m.eval()
@@ -365,7 +411,7 @@ def compare(instruction, max_new_tokens=150, seed=0):
     print("\n── SFT (adapter OFF, before DPO) ──\n", before)
     print("\n── DPO (adapter ON, after) ──\n", after)
 
-compare("Explain why the sky is blue.")
+compare("Explain how plants make their food")
 
 """### **PROMPT**: Explain why the sky is blue.
 
@@ -375,4 +421,64 @@ compare("Explain why the sky is blue.")
 ### ── **DPO (adapter ON, after)** ──
  The reason for the color of skies being seen as they appear to be clear and bluish due to low atmospheric concentrations, which results in a decrease in red light intensity over time because it takes longer at higher altitudes than lower latitudes such as Antarctica or high mountains where sunlight can reach more directly through clouds that are visible from above them (a phenomenon known as the albedo effect).
 
+---
+
+
+
+---
+
+## **Push to HuggingFace-Hub**
+
+---
+
+
+
+---
 """
+
+# ═══════════════════════════════════════════════════════════════════
+# Assemble the 3 stage models and push each to the Hub
+# Run AFTER all adapters are saved: smollm-lora-cpt-wikitext,
+# smollm-lora-sft-alpaca, smollm-dpo-orca all exist on disk.
+# ═══════════════════════════════════════════════════════════════════
+from huggingface_hub import login
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
+
+login()  # paste a WRITE token: hf.co/settings/tokens
+
+BASE = "HuggingFaceTB/SmolLM-135M"
+USER = "m-lagnajit"   # ← your HF username
+
+def build_and_push(adapter_chain, repo):
+    """Merge base→...→last adapter in order, push standalone model."""
+    m = AutoModelForCausalLM.from_pretrained(BASE, torch_dtype=torch.float32)
+    for adapter_path in adapter_chain:                 # apply in chain order
+        m = PeftModel.from_pretrained(m, adapter_path).merge_and_unload()
+    m.push_to_hub(repo)
+    print(f"pushed → {repo}")
+
+# Stage 2: base + CPT
+build_and_push(["smollm-lora-cpt-wikitext"],
+               f"{USER}/minigpt-v3-cpt")
+
+# Stage 3: base + CPT + SFT  (SFT was trained against merged-CPT)
+build_and_push(["smollm-lora-cpt-wikitext", "smollm-lora-sft-alpaca"],
+               f"{USER}/minigpt-v3-sft")
+
+# Stage 4: base + CPT + SFT + DPO  (DPO trained against merged-SFT)
+build_and_push(["smollm-lora-cpt-wikitext", "smollm-lora-sft-alpaca",
+                "smollm-dpo-orca"],
+               f"{USER}/minigpt-v3-dpo")
+
+# tokenizer (same for all stages) → push once to the DPO repo, reuse everywhere
+tok = AutoTokenizer.from_pretrained(BASE)
+if tok.pad_token is None:
+    tok.pad_token = tok.eos_token
+tok.push_to_hub(f"{USER}/minigpt-v3-dpo")
+print("done — 3 stage models + tokenizer on the Hub")
+
+!zip -r "/content/smollm-lora-cpt-wikitext.zip" "/content/smollm-lora-cpt-wikitext"
+!zip -r "/content/smollm-lora-sft-alpaca.zip" "/content/smollm-lora-sft-alpaca"
+!zip -r "/content/smollm-dpo-orca.zip" "/content/smollm-dpo-orca"
