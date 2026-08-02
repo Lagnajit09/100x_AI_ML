@@ -69,9 +69,9 @@ def get_tokenizer():
 
 
 @st.cache_resource(max_entries=1, show_spinner=False)
-def get_model(repo):
+def get_model(repo, dtype=DTYPE):
     m = AutoModelForCausalLM.from_pretrained(
-        repo, torch_dtype=DTYPE, low_cpu_mem_usage=True
+        repo, torch_dtype=dtype, low_cpu_mem_usage=True
     )
     m.eval()
     return m
@@ -102,7 +102,7 @@ def generate_stage(repo, instruction, temperature, top_p, max_new_tokens):
 
 
 def generate_grpo(a, b, temperature, top_p):
-    tok, model = get_tokenizer(), get_model(GRPO_REPO)
+    tok, model = get_tokenizer(), get_model(GRPO_REPO, torch.float32)
     prompt = GRPO_TEMPLATE.format(question=f"What is {a} + {b}?")
     enc = tok(prompt, return_tensors="pt")
     plen = enc["input_ids"].shape[1]
