@@ -102,13 +102,16 @@ def generate_stage(repo, instruction, temperature, top_p, max_new_tokens):
 
 
 def generate_grpo(a, b, temperature, top_p):
-    """Few-shot arithmetic prompt → raw completion + extracted answer + correctness."""
+    tok, model = get_tokenizer(), get_model(GRPO_REPO)
     prompt = GRPO_TEMPLATE.format(question=f"What is {a} + {b}?")
-    # rep_pen=1.0 / no ngram ban: the trained output is very short (<answer>N</answer>);
-    # penalties that help long free-form text only corrupt this tiny structured output.
-    raw = _generate(GRPO_REPO, prompt, temperature, top_p, max_new_tokens=16,
-                    rep_pen=1.0, ngram=0)
-    m = ANSWER_RE.search(raw)
+    enc = tok(prompt, return_tensors="pt")
+    plen = enc["input_ids"].shape[1]
+    with torch.no_grad():
+        out = model.generate(**enc, max_new_tokens=16, do_sample=True,
+                             temperature=float(temperature), top_p=float(top_p),
+                             pad_token_id=tok.eos_token_id)
+    raw  = tok.decode(out[0][plen:], skip_special_tokens=True).strip()
+    m    = ANSWER_RE.search(raw)                       # tags ARE produced → this will match
     pred = re.sub(r"[^0-9-]", "", m.group(1)) if m else ""
     gold = str(a + b)
     return raw, pred, (pred == gold), gold
