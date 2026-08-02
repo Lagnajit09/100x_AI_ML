@@ -379,7 +379,9 @@ with tab_rlvr:
         with rc1:
             st.markdown('<div class="col-label">Raw output (what the model emitted)</div>',
                         unsafe_allow_html=True)
-            st.markdown(f'<div class="raw-box">{g["raw"] or "—"}</div>', unsafe_allow_html=True)
+            # Show the model's output exactly as-is: st.code renders it literally,
+            # with no HTML or markdown interpretation.
+            st.code(g["raw"] or "—", language=None)
         with rc2:
             st.markdown('<div class="col-label">Extracted answer (what the verifier reads)</div>',
                         unsafe_allow_html=True)
