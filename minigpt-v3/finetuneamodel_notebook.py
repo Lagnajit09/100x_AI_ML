@@ -9,17 +9,18 @@ Original file is located at
 ### **Installs and Imports**
 """
 
-!pip install -q transformers datasets peft trl
+!pip install -q --upgrade transformers datasets peft trl
 
 # Upgrade torchao to a compatible version
 !pip install --upgrade torchao
 
-import torch, random
+import torch, random, re
 import requests
+import pandas as pd
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model, PeftModel
 from datasets import load_dataset
-from trl import DPOTrainer, DPOConfig
+from trl import DPOTrainer, DPOConfig, GRPOTrainer, GRPOConfig
 
 """### **Load the base model** and tokenizer, put the model on the GPU."""
 
@@ -309,7 +310,11 @@ model.save_pretrained("smollm-lora-sft-alpaca")
 
 """---
 
+---
+
 ## **RLHF + DPO (Direct Preference Optimization)**
+
+---
 
 ---
 
@@ -479,6 +484,220 @@ if tok.pad_token is None:
 tok.push_to_hub(f"{USER}/minigpt-v3-dpo")
 print("done — 3 stage models + tokenizer on the Hub")
 
-!zip -r "/content/smollm-lora-cpt-wikitext.zip" "/content/smollm-lora-cpt-wikitext"
-!zip -r "/content/smollm-lora-sft-alpaca.zip" "/content/smollm-lora-sft-alpaca"
-!zip -r "/content/smollm-dpo-orca.zip" "/content/smollm-dpo-orca"
+# !zip -r "/content/smollm-lora-cpt-wikitext.zip" "/content/smollm-lora-cpt-wikitext"
+# !zip -r "/content/smollm-lora-sft-alpaca.zip" "/content/smollm-lora-sft-alpaca"
+# !zip -r "/content/smollm-dpo-orca.zip" "/content/smollm-dpo-orca"
+
+"""---
+
+
+
+---
+
+## **RLVR + GRPO**
+
+---
+
+
+
+---
+
+### **Load the aligned V3 as the starting policy from HF-Hub:**
+"""
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+V3_REPO   = "m-lagnajit/minigpt-v3-dpo"           # deployed V3: base+CPT+SFT+DPO, already merged
+policy    = AutoModelForCausalLM.from_pretrained(V3_REPO).to(device)
+
+"""### **Tokenizer:**"""
+
+tokenizer = AutoTokenizer.from_pretrained(V3_REPO)
+if tokenizer.pad_token is None:                   # SmolLM base has no pad token
+    tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "left"                   # GRPO generates, so pad left
+
+"""### **FewShots + The prompt-only dataset (note: no responses):**"""
+
+import random
+from datasets import Dataset
+random.seed(0)
+
+FEWSHOT = (
+    "### Instruction:\nWhat is 1 + 1?\n\n### Response:\n<answer>2</answer>\n\n"
+    "### Instruction:\nWhat is 3 + 4?\n\n### Response:\n<answer>7</answer>\n\n"
+    "### Instruction:\nWhat is 5 + 2?\n\n### Response:\n<answer>7</answer>\n\n"
+)
+TEMPLATE = FEWSHOT + "### Instruction:\n{question}\n\n### Response:\n"
+
+rows = []
+for _ in range(400):
+    a, b = random.randint(0, 9), random.randint(0, 9)
+    rows.append({"question": f"What is {a} + {b}?", "answer": str(a + b)})
+
+prompt_ds = Dataset.from_list([
+    {"prompt": TEMPLATE.format(question=r["question"]), "answer": r["answer"]}
+    for r in rows
+])
+assert TEMPLATE.count("### Response:\n<answer>") >= 3, "few-shot exemplars missing"
+print(prompt_ds[0]["prompt"])
+
+"""### **The Reward Functions:**"""
+
+WELL_FORMED = re.compile(r"<answer>\s*(.+?)\s*</answer>", re.DOTALL)  # captures INNER content
+
+def format_reward(completions, **kwargs):
+    # Reachable floor — but now requires NON-EMPTY content, so empty <answer></answer> earns 0.
+    out = []
+    for c in completions:
+        m = WELL_FORMED.search(c)
+        out.append(1.0 if (m and m.group(1).strip()) else 0.0)
+    return out
+
+def accuracy_reward(completions, answer, **kwargs):   # 'answer' = the ground-truth column
+    # The stretch signal — only pays if the wrapped answer is actually correct.
+    out = []
+    for c, gold in zip(completions, answer):
+        m = WELL_FORMED.search(c)
+        pred = m.group(1).strip() if m else ""
+        out.append(1.0 if pred == gold.strip() else 0.0)
+    return out
+
+reward_funcs = [format_reward, accuracy_reward]   # summed → max 2.0
+
+"""### **Config, Trainer, Train & Save the Model:**"""
+
+peft_config = LoraConfig(
+    task_type="CAUSAL_LM", r=32, lora_alpha=64,
+    target_modules=["q_proj","k_proj","v_proj","o_proj"],
+    lora_dropout=0.05, bias="none",
+)
+
+grpo_config = GRPOConfig(
+    output_dir="smollm-grpo-arith",
+    learning_rate=5e-5,
+    per_device_train_batch_size=8, gradient_accumulation_steps=4,
+    num_generations=8, max_completion_length=64,
+    temperature=0.9, beta=0.0,
+    max_steps=500,
+    warmup_steps=10, logging_steps=10,
+    bf16=torch.cuda.is_available(), report_to="none",
+)
+
+trainer = GRPOTrainer(
+    model            = policy,                        # merged aligned V3 (plain CausalLM)
+    reward_funcs     = reward_funcs,
+    args             = grpo_config,
+    train_dataset    = prompt_ds,
+    peft_config      = peft_config,                   # fresh GRPO adapters on top
+    processing_class = tokenizer,
+)
+trainer.train()
+trainer.save_model("smollm-grpo-format")
+
+"""### **Read the training log the right way:**"""
+
+logs = pd.DataFrame(trainer.state.log_history)
+cols = [c for c in ["step", "reward", "reward_std", "frac_reward_zero_std", "kl", "loss"] if c in logs]
+print(logs[cols].dropna().to_string(index=False))   # also: one rewards/<func>/mean column each
+
+"""### **Test and Compare:**"""
+
+# ── Test the GRPO stage on the VERIFIABLE task: adapter OFF vs ON ──
+import re, torch
+
+# Guard that can't false-pass: demands the 3 worked exemplars from Cell 3.
+assert TEMPLATE.count("### Response:\n<answer>") >= 3, "Re-run the few-shot arithmetic Cell 3 first."
+
+# SAME content-requiring regex as the reward — empty tags do NOT count.
+WELL_FORMED = re.compile(r"<answer>\s*(.+?)\s*</\s*answer\s*>", re.DOTALL | re.IGNORECASE)
+
+# Held-out sums — NONE of these are the exemplars, so this tests generalization.
+test = [("What is 3 + 9?", "12"), ("What is 2 + 2?", "4"), ("What is 5 + 1?", "6"),
+        ("What is 3 + 6?", "9"), ("What is 0 + 7?", "7")]
+
+policy = trainer.model            # PeftModel: merged V3 + fresh GRPO adapter
+policy.eval()
+gen_kw = dict(max_new_tokens=64, do_sample=True, temperature=0.7,
+              top_p=0.9, repetition_penalty=1.3,
+              pad_token_id=tokenizer.eos_token_id)
+
+def run(prompt, seed=0):
+    enc   = tokenizer(prompt, return_tensors="pt").to(device)
+    strip = lambda o: tokenizer.decode(o[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
+    torch.manual_seed(seed)
+    with torch.no_grad(), policy.disable_adapter():   # OFF → few-shot only (pre-GRPO)
+        before = strip(policy.generate(**enc, **gen_kw))
+    torch.manual_seed(seed)                            # identical draw → fair A/B
+    with torch.no_grad():                             # ON → few-shot + GRPO
+        after = strip(policy.generate(**enc, **gen_kw))
+    return before, after
+
+def grade(text, gold):
+    match = WELL_FORMED.search(text)
+    pred  = re.sub(r"[^0-9-]", "", match.group(1)) if match else ""   # pull the integer out
+    return bool(pred), (pred == gold), pred
+
+# Sanity: the exemplars MUST be visible before the real question
+print("PROMPT FED TO MODEL:\n" + "-" * 60)
+print(TEMPLATE.format(question=test[0][0]))
+print("=" * 60)
+
+fb = ab = fa = aa = 0     # format/acc, before/after
+for q, gold in test:
+    before, after = run(TEMPLATE.format(question=q))
+    f_b, a_b, _ = grade(before, gold)
+    f_a, a_a, _ = grade(after,  gold)
+    fb += f_b; ab += a_b; fa += f_a; aa += a_a
+    print(f"Q: {q}  (gold {gold})")
+    print(f"  before [fmt={f_b} acc={a_b}] -> {before.strip()[:80]}")
+    print(f"  after  [fmt={f_a} acc={a_a}] -> {after.strip()[:80]}")
+    print("-" * 60)
+
+print(f"\nformat   — before: {fb}/5   after: {fa}/5")
+print(f"accuracy — before: {ab}/5   after: {aa}/5")
+
+from collections import Counter
+def bucket(after, gold):
+    m = WELL_FORMED.search(after)
+    pred = re.sub(r"[^0-9-]", "", m.group(1)) if m else ""
+    fmt = bool(m and pred)
+    acc = (pred == gold)
+    return (1.0 if fmt else 0.0) + (1.0 if acc else 0.0)   # → 0.0, 1.0, or 2.0
+
+dist = Counter(bucket(run(TEMPLATE.format(question=q))[1], gold) for q, gold in test)
+print("reward buckets (after):", dict(dist))   # e.g. {1.0: 4, 0.0: 1} = all format, no accuracy
+
+"""### **Zip & Save:**"""
+
+!zip -r "/content/smollm-grpo-arith.zip" "/content/smollm-grpo-arith"
+!zip -r "/content/smollm-grpo-format.zip" "/content/smollm-grpo-format"
+
+"""### **Push to HuggingFace-Hub:**"""
+
+from huggingface_hub import login
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
+
+login()
+USER = "m-lagnajit"
+
+# Start from the ALREADY-MERGED v3-dpo on the Hub (= base+CPT+SFT+DPO), not local folders.
+m = AutoModelForCausalLM.from_pretrained(f"{USER}/minigpt-v3-dpo", torch_dtype=torch.float32)
+# Attach the one adapter from THIS session and fold it in.
+m = PeftModel.from_pretrained(m, "smollm-grpo-arith").merge_and_unload()
+m.push_to_hub(f"{USER}/minigpt-v3-grpo")
+
+tok = AutoTokenizer.from_pretrained(f"{USER}/minigpt-v3-dpo")
+if tok.pad_token is None:
+    tok.pad_token = tok.eos_token
+tok.push_to_hub(f"{USER}/minigpt-v3-grpo")
+print("done → minigpt-v3-grpo")
+
+"""### **Sanity Check:**"""
+
+check = AutoModelForCausalLM.from_pretrained(f"{USER}/minigpt-v3-grpo").to(device).eval()
+enc = tokenizer(TEMPLATE.format(question="What is 6 + 2?"), return_tensors="pt").to(device)
+out = check.generate(**enc, max_new_tokens=64, do_sample=True, temperature=0.7,
+                     top_p=0.9, repetition_penalty=1.3, pad_token_id=tokenizer.eos_token_id)
+print(tokenizer.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True))

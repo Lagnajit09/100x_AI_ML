@@ -106,7 +106,7 @@ def generate_grpo(a, b, temperature, top_p):
     prompt = GRPO_TEMPLATE.format(question=f"What is {a} + {b}?")
     # rep_pen=1.0 / no ngram ban: the trained output is very short (<answer>N</answer>);
     # penalties that help long free-form text only corrupt this tiny structured output.
-    raw = _generate(GRPO_REPO, prompt, temperature, top_p, max_new_tokens=32,
+    raw = _generate(GRPO_REPO, prompt, temperature, top_p, max_new_tokens=16,
                     rep_pen=1.0, ngram=0)
     m = ANSWER_RE.search(raw)
     pred = re.sub(r"[^0-9-]", "", m.group(1)) if m else ""
