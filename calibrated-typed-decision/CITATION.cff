@@ -1,0 +1,47 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite the technical report."
+type: software
+title: "Calibrated Typed Decisions: dataset builders, student training and released models"
+authors:
+  - family-names: Moharana
+    given-names: Lagnajit
+date-released: 2026-11-12
+license: Apache-2.0
+abstract: >-
+  Code for building calibrated-typed-decisions, a dataset of typed decisions (a text, a question and a set of
+  options) whose training questions carry the calibrated option probabilities of Qwen2.5-7B-Instruct, or human
+  rater votes where they exist; for training ModernBERT students on six targets and evaluating them on familiar
+  data, a new label set (SNIPS) and a new kind of judgment (PubMedQA); and for publishing the dataset card and
+  the two released students.
+url: "https://huggingface.co/collections/m-lagnajit/calibrated-typed-decision"
+repository-code: "https://github.com/Lagnajit09/100x_AI_ML/tree/main/calibrated-typed-decision"
+repository-artifact: "https://huggingface.co/collections/m-lagnajit/calibrated-typed-decision"
+identifiers:
+  - type: url
+    value: "https://lagnajitmoharana.web.app/calibrated-typed-decisions-technical-report.pdf"
+    description: "Technical report (PDF)"
+  - type: url
+    value: "https://huggingface.co/datasets/m-lagnajit/calibrated-typed-decisions"
+    description: "Dataset, versions v1.0, v2.0 and v2.1"
+  - type: url
+    value: "https://huggingface.co/m-lagnajit/ctd-student-f"
+    description: "Released student F: for data like the training sources"
+  - type: url
+    value: "https://huggingface.co/m-lagnajit/ctd-student-e"
+    description: "Released student E: for new label sets of the same kind"
+keywords:
+  - calibration
+  - knowledge distillation
+  - typed decisions
+  - ModernBERT
+preferred-citation:
+  type: report
+  title: "Calibrated Typed Decisions: What a 7B Teacher's Soft Labels Do, and Don't, Teach a Small Classifier"
+  authors:
+    - family-names: Moharana
+      given-names: Lagnajit
+  year: 2026
+  month: 11
+  institution:
+    name: "Independent"
+  url: "https://lagnajitmoharana.web.app/calibrated-typed-decisions-technical-report.pdf"
